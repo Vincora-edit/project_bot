@@ -163,6 +163,33 @@ WHERE stage_id = 'GEO:DONE'
 
 
 -- ============================================
+-- 5. Таблица client_knowledge — база знаний по клиентам
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS client_knowledge (
+    id SERIAL PRIMARY KEY,
+    chat_id TEXT UNIQUE NOT NULL,           -- ID чата в Telegram (уникальный)
+    client_name TEXT,                       -- Название компании/клиента
+    decision_maker TEXT,                    -- ЛПР (имя, должность)
+    contact_person TEXT,                    -- Контактное лицо
+    preferences TEXT,                       -- Что любит
+    dislikes TEXT,                          -- Что не любит
+    communication_style TEXT,               -- Стиль общения (формальный/дружеский)
+    timezone TEXT DEFAULT 'Europe/Moscow',  -- Часовой пояс
+    best_contact_time TEXT,                 -- Лучшее время для связи
+    service_type TEXT,                      -- Услуга (geo, context, site...)
+    start_date DATE,                        -- Дата начала работы
+    payment_day INT,                        -- День оплаты (1-31)
+    notes TEXT,                             -- Свободные заметки
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Индекс для client_knowledge
+CREATE INDEX IF NOT EXISTS idx_client_knowledge_chat_id ON client_knowledge(chat_id);
+
+
+-- ============================================
 -- ПОЛЕЗНЫЕ ЗАПРОСЫ
 -- ============================================
 

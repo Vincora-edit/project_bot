@@ -9,6 +9,7 @@
 - /link — привязать сделку
 - /deals — список сделок в чате
 - /unlink — отвязать сделку
+- /client — база знаний по клиенту
 """
 
 from datetime import datetime, timezone
@@ -295,4 +296,156 @@ async def cmd_unlink(message: types.Message, command: CommandObject):
 
     except Exception as e:
         logger.error(f"Ошибка отвязки сделки: {e}")
+        await message.answer(f"❌ Ошибка: {e}")
+
+
+# Маппинг полей для /client команды
+CLIENT_FIELDS = {
+    "lpr": ("decision_maker", "ЛПР"),
+    "contact": ("contact_person", "Контактное лицо"),
+    "likes": ("preferences", "Предпочтения"),
+    "dislikes": ("dislikes", "Не любит"),
+    "style": ("communication_style", "Стиль общения"),
+    "time": ("best_contact_time", "Лучшее время связи"),
+    "tz": ("timezone", "Часовой пояс"),
+    "service": ("service_type", "Тип услуги"),
+    "payday": ("payment_day", "День оплаты"),
+    "name": ("client_name", "Название клиента"),
+}
+
+
+@router.message(Command("client"))
+async def cmd_client(message: types.Message, command: CommandObject):
+    """
+    /client — база знаний по клиенту.
+
+    Использование:
+    /client — показать всю информацию
+    /client lpr Иван Петров, директор
+    /client contact Мария, маркетолог
+    /client likes Детальные отчёты
+    /client dislikes Звонки без предупреждения
+    /client style Дружеский
+    /client time 10:00-12:00
+    /client note Уходит в отпуск в августе
+    /client payday 15
+    """
+    if message.from_user.id not in settings.project_ids:
+        return
+
+    if message.chat.type == "private":
+        await message.answer("Команда работает только в групповых чатах.")
+        return
+
+    chat_id = str(message.chat.id)
+    args = (command.args or "").strip()
+
+    # Если без аргументов — показать информацию
+    if not args:
+        info = db.get_client_knowledge(chat_id)
+
+        if not info:
+            await message.answer(
+                "📋 *База знаний по клиенту пуста*\n\n"
+                "Доступные команды:\n"
+                "`/client name` — название клиента\n"
+                "`/client lpr` — ЛПР (кто принимает решения)\n"
+                "`/client contact` — контактное лицо\n"
+                "`/client likes` — что нравится клиенту\n"
+                "`/client dislikes` — что не нравится\n"
+                "`/client style` — стиль общения\n"
+                "`/client time` — лучшее время для связи\n"
+                "`/client service` — тип услуги\n"
+                "`/client payday` — день оплаты\n"
+                "`/client note` — добавить заметку",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Форматируем вывод
+        lines = ["📋 *База знаний по клиенту:*\n"]
+
+        field_labels = {
+            "client_name": "🏢 Клиент",
+            "decision_maker": "👔 ЛПР",
+            "contact_person": "👤 Контакт",
+            "preferences": "👍 Нравится",
+            "dislikes": "👎 Не нравится",
+            "communication_style": "💬 Стиль",
+            "timezone": "🌍 Часовой пояс",
+            "best_contact_time": "⏰ Лучшее время",
+            "service_type": "🛠 Услуга",
+            "start_date": "📅 Начало работы",
+            "payment_day": "💰 День оплаты",
+            "notes": "📝 Заметки",
+        }
+
+        for field, label in field_labels.items():
+            value = info.get(field)
+            if value:
+                if field == "notes":
+                    lines.append(f"\n{label}:\n{value}")
+                else:
+                    lines.append(f"{label}: {value}")
+
+        await message.answer("\n".join(lines), parse_mode="Markdown")
+        return
+
+    # Парсим команду: field value
+    parts = args.split(maxsplit=1)
+    field_key = parts[0].lower()
+
+    # Обработка заметок отдельно
+    if field_key == "note":
+        if len(parts) < 2:
+            await message.answer("Использование: `/client note Текст заметки`", parse_mode="Markdown")
+            return
+
+        note_text = parts[1]
+        timestamp = datetime.now(timezone.utc).strftime("%d.%m.%Y %H:%M")
+        formatted_note = f"[{timestamp}] {note_text}"
+
+        try:
+            success = db.append_client_note(chat_id, formatted_note)
+            if success:
+                await message.answer("✅ Заметка добавлена!", parse_mode="Markdown")
+            else:
+                await message.answer("❌ Не удалось добавить заметку.")
+        except Exception as e:
+            logger.error(f"Ошибка добавления заметки: {e}")
+            await message.answer(f"❌ Ошибка: {e}")
+        return
+
+    # Обработка остальных полей
+    if field_key not in CLIENT_FIELDS:
+        await message.answer(
+            f"❓ Неизвестное поле: `{field_key}`\n\n"
+            "Доступные поля: " + ", ".join(f"`{k}`" for k in CLIENT_FIELDS.keys()) + ", `note`",
+            parse_mode="Markdown"
+        )
+        return
+
+    if len(parts) < 2:
+        db_field, label = CLIENT_FIELDS[field_key]
+        await message.answer(f"Использование: `/client {field_key} значение`", parse_mode="Markdown")
+        return
+
+    value = parts[1]
+    db_field, label = CLIENT_FIELDS[field_key]
+
+    # Для payday проверяем, что это число
+    if field_key == "payday":
+        if not value.isdigit() or not (1 <= int(value) <= 31):
+            await message.answer("❌ День оплаты должен быть числом от 1 до 31.")
+            return
+        value = int(value)
+
+    try:
+        success = db.update_client_field(chat_id, db_field, value)
+        if success:
+            await message.answer(f"✅ {label} обновлено: {value}", parse_mode="Markdown")
+        else:
+            await message.answer("❌ Не удалось обновить информацию.")
+    except Exception as e:
+        logger.error(f"Ошибка обновления клиента: {e}")
         await message.answer(f"❌ Ошибка: {e}")

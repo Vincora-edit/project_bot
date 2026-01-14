@@ -312,6 +312,62 @@ class Database:
             logger.error(f"Error marking NPS sent: {e}")
             return False
 
+    # ============ CLIENT KNOWLEDGE ============
+
+    def get_client_knowledge(self, chat_id: str) -> dict | None:
+        """Получает базу знаний по клиенту."""
+        try:
+            result = (
+                self.client.table("client_knowledge")
+                .select("*")
+                .eq("chat_id", chat_id)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error getting client knowledge: {e}")
+            return None
+
+    def upsert_client_knowledge(self, chat_id: str, **kwargs) -> bool:
+        """Создаёт или обновляет базу знаний по клиенту."""
+        try:
+            existing = self.get_client_knowledge(chat_id)
+
+            data = {"chat_id": chat_id, **kwargs}
+            data["updated_at"] = datetime.now(timezone.utc).isoformat()
+
+            if existing:
+                self.client.table("client_knowledge").update(data).eq("chat_id", chat_id).execute()
+            else:
+                data["created_at"] = datetime.now(timezone.utc).isoformat()
+                self.client.table("client_knowledge").insert(data).execute()
+
+            return True
+        except Exception as e:
+            logger.error(f"Error upserting client knowledge: {e}")
+            return False
+
+    def update_client_field(self, chat_id: str, field: str, value: str) -> bool:
+        """Обновляет одно поле базы знаний."""
+        return self.upsert_client_knowledge(chat_id, **{field: value})
+
+    def append_client_note(self, chat_id: str, note: str) -> bool:
+        """Добавляет заметку к существующим."""
+        try:
+            existing = self.get_client_knowledge(chat_id)
+            current_notes = existing.get("notes", "") if existing else ""
+
+            if current_notes:
+                new_notes = f"{current_notes}\n---\n{note}"
+            else:
+                new_notes = note
+
+            return self.upsert_client_knowledge(chat_id, notes=new_notes)
+        except Exception as e:
+            logger.error(f"Error appending client note: {e}")
+            return False
+
 
 # Глобальный экземпляр
 db = Database()
