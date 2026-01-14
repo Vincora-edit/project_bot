@@ -3,7 +3,7 @@
 
 Команды:
 - /start — приветствие
-- /chatid — получить ID чата для Битрикса
+- /botchatid — получить ID чата для Битрикса
 - /who — кто ответственный проджект
 - /assign — назначить проджекта
 - /link — привязать сделку
@@ -34,10 +34,10 @@ async def cmd_start(message: types.Message):
     )
 
 
-@router.message(Command("chatid"))
+@router.message(Command("botchatid"))
 async def cmd_chatid(message: types.Message):
     """
-    /chatid — получить ID чата и топика для настройки в Битриксе.
+    /botchatid — получить ID чата и топика для настройки в Битриксе.
     """
     chat_id = message.chat.id
     thread_id = message.message_thread_id
