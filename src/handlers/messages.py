@@ -9,7 +9,7 @@
 - Генерация вариантов ответа в личке
 """
 
-from datetime import timedelta
+from datetime import timedelta, datetime, timezone
 
 from aiogram import Router, types, F
 
@@ -31,6 +31,43 @@ def set_scheduler(sched):
     """Устанавливает планировщик для отложенных задач."""
     global scheduler
     scheduler = sched
+
+
+async def check_for_commitments(message: types.Message, text: str):
+    """Проверяет сообщение проджекта на договорённости и создаёт напоминание."""
+    try:
+        # Получаем контекст
+        context = await get_recent_context(str(message.chat.id), int(message.message_id), limit=5)
+
+        # Проверяем через AI
+        commitment = await ai_service.extract_commitment(text, context)
+
+        if not commitment:
+            return
+
+        # Вычисляем время напоминания
+        remind_in_hours = commitment.get("remind_in_hours", 24)
+        remind_at = datetime.now(timezone.utc) + timedelta(hours=remind_in_hours)
+
+        # Создаём напоминание
+        reminder = db.create_reminder(
+            chat_id=str(message.chat.id),
+            chat_name=message.chat.title or "Unknown",
+            project_id=message.from_user.id,
+            reminder_text=commitment.get("text", text[:100]),
+            remind_at=remind_at,
+            context=text[:500],
+            source_message_id=message.message_id
+        )
+
+        if reminder:
+            logger.info(
+                f"Создано напоминание: '{commitment.get('text')}' "
+                f"через {remind_in_hours}ч для project_id={message.from_user.id}"
+            )
+
+    except Exception as e:
+        logger.error(f"Ошибка проверки договорённостей: {e}")
 
 
 async def log_message(message: types.Message, is_project: bool) -> dict | None:
@@ -267,6 +304,10 @@ async def handle_message(message: types.Message):
             user_id,
             message.from_user.full_name,
         )
+
+    # Если проджект — проверяем на договорённости
+    if is_project:
+        await check_for_commitments(message, text)
 
     # Если НЕ проджект — анализируем (клиент/участник)
     if not is_project:

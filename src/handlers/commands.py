@@ -15,8 +15,9 @@
 
 from datetime import datetime, timezone, timedelta
 
-from aiogram import Router, types
+from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 
 from src.config import settings
 from src.core import db, bot
@@ -26,6 +27,23 @@ from src.utils.logging import get_logger
 
 logger = get_logger(__name__)
 router = Router(name="commands")
+
+
+# ============ INLINE KEYBOARDS ============
+
+def get_clients_keyboard(chats: list[dict], action: str = "client") -> InlineKeyboardMarkup:
+    """Создаёт клавиатуру со списком клиентов."""
+    buttons = []
+    for chat in chats[:20]:  # Лимит 20 кнопок
+        chat_name = chat.get("chat_name", "Без названия")[:30]
+        chat_id = chat.get("chat_id")
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"📋 {chat_name}",
+                callback_data=f"{action}:{chat_id}"
+            )
+        ])
+    return InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 @router.message(Command("start"))
@@ -351,7 +369,7 @@ async def cmd_client(message: types.Message, command: CommandObject):
     if is_private:
         # В личке: первый аргумент может быть chat_id
         if not args:
-            # Показываем список клиентов
+            # Показываем список клиентов с кнопками
             chats = _get_chat_list_for_user(message.from_user.id)
             if not chats:
                 await message.answer(
@@ -361,14 +379,12 @@ async def cmd_client(message: types.Message, command: CommandObject):
                 )
                 return
 
-            lines = ["📋 *Твои клиенты:*\n"]
-            for chat in chats:
-                chat_name = chat.get("chat_name", "Без названия")
-                cid = chat.get("chat_id")
-                lines.append(f"• `{cid}` — {chat_name}")
-
-            lines.append("\n\n💡 Используй: `/client CHAT_ID` для просмотра базы знаний")
-            await message.answer("\n".join(lines), parse_mode="Markdown")
+            keyboard = get_clients_keyboard(chats, "client")
+            await message.answer(
+                "📋 *Выбери клиента:*",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
             return
 
         parts = args.split(maxsplit=1)
@@ -542,7 +558,7 @@ async def cmd_digest(message: types.Message, command: CommandObject):
 
     if is_private:
         if not args:
-            # Показываем список клиентов
+            # Показываем список клиентов с кнопками
             chats = _get_chat_list_for_user(message.from_user.id)
             if not chats:
                 await message.answer(
@@ -552,14 +568,12 @@ async def cmd_digest(message: types.Message, command: CommandObject):
                 )
                 return
 
-            lines = ["📋 *Твои клиенты:*\n"]
-            for chat in chats:
-                chat_name = chat.get("chat_name", "Без названия")
-                cid = chat.get("chat_id")
-                lines.append(f"• `{cid}` — {chat_name}")
-
-            lines.append("\n\n💡 Используй: `/digest CHAT_ID` или `/digest CHAT_ID 14d`")
-            await message.answer("\n".join(lines), parse_mode="Markdown")
+            keyboard = get_clients_keyboard(chats, "digest")
+            await message.answer(
+                "📊 *Выбери клиента для дайджеста:*",
+                parse_mode="Markdown",
+                reply_markup=keyboard
+            )
             return
 
         parts = args.split()
@@ -634,3 +648,168 @@ async def cmd_digest(message: types.Message, command: CommandObject):
     except Exception as e:
         logger.error(f"Ошибка генерации дайджеста: {e}")
         await loading_msg.edit_text(f"❌ Ошибка генерации дайджеста: {e}")
+
+
+# ============ CALLBACK HANDLERS ============
+
+async def _show_client_info(chat_id: str, chat_name: str, callback: CallbackQuery):
+    """Показывает информацию о клиенте, при необходимости извлекает из переписки."""
+    info = db.get_client_knowledge(chat_id)
+
+    # Если базы знаний нет — пробуем извлечь из переписки
+    if not info or len([v for v in info.values() if v]) <= 2:  # Только chat_id и timestamps
+        await callback.message.edit_text(
+            f"📋 *{chat_name}*\n\n⏳ Анализирую переписку...",
+            parse_mode="Markdown"
+        )
+
+        # Получаем историю за 60 дней
+        since = datetime.now(timezone.utc) - timedelta(days=60)
+        messages = db.get_messages_for_period(chat_id, since, limit=300)
+
+        if messages:
+            extracted = await ai_service.extract_client_info_from_history(messages, chat_name)
+
+            if extracted:
+                # Сохраняем в БД
+                db.upsert_client_knowledge(chat_id, **extracted)
+                info = db.get_client_knowledge(chat_id)
+
+    # Форматируем вывод
+    if not info or len([k for k, v in info.items() if v and k not in ("id", "chat_id", "created_at", "updated_at")]) == 0:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📊 Дайджест", callback_data=f"digest:{chat_id}")],
+            [InlineKeyboardButton(text="« Назад к списку", callback_data="back:clients")]
+        ])
+        await callback.message.edit_text(
+            f"📋 *{chat_name}*\n\n"
+            "ℹ️ Информация о клиенте не найдена.\n"
+            "Возможно, переписки ещё мало для анализа.",
+            parse_mode="Markdown",
+            reply_markup=keyboard
+        )
+        return
+
+    field_labels = {
+        "client_name": "🏢 Клиент",
+        "decision_maker": "👔 ЛПР",
+        "contact_person": "👤 Контакт",
+        "preferences": "👍 Нравится",
+        "dislikes": "👎 Не нравится",
+        "communication_style": "💬 Стиль",
+        "timezone": "🌍 Часовой пояс",
+        "best_contact_time": "⏰ Лучшее время",
+        "service_type": "🛠 Услуга",
+        "start_date": "📅 Начало работы",
+        "payment_day": "💰 День оплаты",
+        "notes": "📝 Заметки",
+    }
+
+    lines = [f"📋 *{chat_name}*\n"]
+
+    for field, label in field_labels.items():
+        value = info.get(field)
+        if value:
+            if field == "notes":
+                lines.append(f"\n{label}:\n{value}")
+            else:
+                lines.append(f"{label}: {value}")
+
+    # Кнопки действий
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="📊 Дайджест", callback_data=f"digest:{chat_id}")],
+        [InlineKeyboardButton(text="« Назад к списку", callback_data="back:clients")]
+    ])
+
+    await callback.message.edit_text("\n".join(lines), parse_mode="Markdown", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("client:"))
+async def callback_client(callback: CallbackQuery):
+    """Обработка нажатия на кнопку клиента."""
+    if callback.from_user.id not in settings.project_ids:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    chat_id = callback.data.split(":")[1]
+
+    # Получаем название чата
+    chats = _get_chat_list_for_user(callback.from_user.id)
+    chat_name = "Клиент"
+    for chat in chats:
+        if chat.get("chat_id") == chat_id:
+            chat_name = chat.get("chat_name", "Клиент")
+            break
+
+    await callback.answer()
+    await _show_client_info(chat_id, chat_name, callback)
+
+
+@router.callback_query(F.data.startswith("digest:"))
+async def callback_digest(callback: CallbackQuery):
+    """Обработка нажатия на кнопку дайджеста."""
+    if callback.from_user.id not in settings.project_ids:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    chat_id = callback.data.split(":")[1]
+
+    await callback.answer()
+    await callback.message.edit_text("⏳ Генерирую дайджест за неделю...")
+
+    try:
+        since = datetime.now(timezone.utc) - timedelta(days=7)
+        messages = db.get_messages_for_period(chat_id, since)
+
+        if not messages:
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="« Назад", callback_data=f"client:{chat_id}")]
+            ])
+            await callback.message.edit_text(
+                "📭 За последнюю неделю сообщений не найдено.",
+                reply_markup=keyboard
+            )
+            return
+
+        client_info = db.get_client_knowledge(chat_id)
+        digest = await ai_service.generate_digest(messages, client_info, "за неделю")
+
+        client_messages = sum(1 for m in messages if not m.get("is_project"))
+        project_messages = sum(1 for m in messages if m.get("is_project"))
+
+        header = (
+            f"📊 *Дайджест за неделю*\n"
+            f"💬 Сообщений: {len(messages)} (клиент: {client_messages}, проджект: {project_messages})\n\n"
+        )
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="« Назад к клиенту", callback_data=f"client:{chat_id}")]
+        ])
+
+        await callback.message.edit_text(header + digest, parse_mode="Markdown", reply_markup=keyboard)
+
+    except Exception as e:
+        logger.error(f"Ошибка дайджеста: {e}")
+        await callback.message.edit_text(f"❌ Ошибка: {e}")
+
+
+@router.callback_query(F.data == "back:clients")
+async def callback_back_clients(callback: CallbackQuery):
+    """Возврат к списку клиентов."""
+    if callback.from_user.id not in settings.project_ids:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    chats = _get_chat_list_for_user(callback.from_user.id)
+
+    if not chats:
+        await callback.answer("Нет клиентов", show_alert=True)
+        return
+
+    keyboard = get_clients_keyboard(chats, "client")
+    await callback.answer()
+    await callback.message.edit_text(
+        "📋 *Выбери клиента:*",
+        parse_mode="Markdown",
+        reply_markup=keyboard
+    )

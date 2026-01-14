@@ -190,6 +190,31 @@ CREATE INDEX IF NOT EXISTS idx_client_knowledge_chat_id ON client_knowledge(chat
 
 
 -- ============================================
+-- 6. Таблица reminders — напоминания о договорённостях
+-- ============================================
+
+CREATE TABLE IF NOT EXISTS reminders (
+    id SERIAL PRIMARY KEY,
+    chat_id TEXT NOT NULL,                  -- ID чата с клиентом
+    chat_name TEXT,                         -- Название чата
+    project_id BIGINT NOT NULL,             -- ID проджекта (кому напоминать)
+    reminder_text TEXT NOT NULL,            -- Текст напоминания
+    context TEXT,                           -- Контекст (из какого сообщения)
+    remind_at TIMESTAMPTZ NOT NULL,         -- Когда напомнить
+    status TEXT DEFAULT 'pending',          -- pending, sent, cancelled
+    sent_at TIMESTAMPTZ,                    -- Когда отправили
+    source_message_id BIGINT,               -- ID исходного сообщения
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Индексы для reminders
+CREATE INDEX IF NOT EXISTS idx_reminders_pending
+    ON reminders(remind_at) WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS idx_reminders_project
+    ON reminders(project_id, status);
+
+
+-- ============================================
 -- ПОЛЕЗНЫЕ ЗАПРОСЫ
 -- ============================================
 

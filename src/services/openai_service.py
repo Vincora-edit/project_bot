@@ -414,6 +414,148 @@ async def generate_digest(
 
         return result
 
+    async def extract_commitment(
+        self,
+        message_text: str,
+        context: str = ""
+    ) -> dict | None:
+        """
+        Извлекает договорённость/обещание из сообщения проджекта.
+
+        Args:
+            message_text: Текст сообщения проджекта
+            context: Контекст диалога
+
+        Returns:
+            dict | None: {
+                "has_commitment": bool,
+                "text": str,  # Краткое описание договорённости
+                "remind_in_hours": int  # Через сколько часов напомнить
+            }
+        """
+        user_content = message_text
+        if context:
+            user_content = f"Контекст диалога:\n{context}\n\nСообщение проджекта:\n{message_text}"
+
+        system_prompt = """Ты анализируешь сообщение проджект-менеджера клиенту.
+Определи, содержит ли сообщение обещание/договорённость, о которой нужно напомнить.
+
+Примеры обещаний:
+- "Завтра пришлю отчёт" → да, напомнить через 20 часов
+- "Созвонимся в понедельник" → да, напомнить за 2 часа до понедельника
+- "Сделаю на этой неделе" → да, напомнить через 3 дня
+- "Уточню у команды и вернусь" → да, напомнить через 4 часа
+- "Посмотрю сегодня" → да, напомнить через 6 часов
+- "Ок, принял" → нет, это не обещание
+- "Спасибо за информацию" → нет
+- "Привет! Как дела?" → нет
+
+Ответь СТРОГО в формате JSON:
+{"has_commitment": true/false, "text": "краткое описание", "remind_in_hours": число}
+
+Если обещания нет, верни:
+{"has_commitment": false, "text": "", "remind_in_hours": 0}
+
+Важно:
+- remind_in_hours должно быть разумным (1-168 часов, то есть до недели)
+- Учитывай текущий день недели для "в понедельник", "завтра" и т.п.
+- Для неопределённых сроков ("скоро", "на днях") ставь 24-48 часов"""
+
+        result = self._call_gpt(system_prompt, user_content, max_tokens=100, temperature=0.3)
+
+        if not result:
+            return None
+
+        # Парсим JSON
+        try:
+            import json
+            # Очищаем от возможных markdown-обёрток
+            result = result.strip()
+            if result.startswith("```"):
+                result = result.split("```")[1]
+                if result.startswith("json"):
+                    result = result[4:]
+            result = result.strip()
+
+            data = json.loads(result)
+            if data.get("has_commitment"):
+                return data
+            return None
+        except Exception as e:
+            logger.error(f"Error parsing commitment: {e}, result: {result}")
+            return None
+
+    async def extract_client_info_from_history(
+        self,
+        messages: list[dict],
+        chat_name: str
+    ) -> dict:
+        """
+        Извлекает информацию о клиенте из истории переписки.
+
+        Args:
+            messages: Список сообщений
+            chat_name: Название чата
+
+        Returns:
+            dict с полями: client_name, decision_maker, contact_person,
+                          preferences, dislikes, communication_style, service_type
+        """
+        if not messages:
+            return {}
+
+        # Форматируем сообщения
+        conversation = []
+        for msg in messages[-150:]:  # Последние 150 сообщений
+            sender = "Клиент" if not msg.get("is_project") else "Проджект"
+            text = msg.get("text", "")[:300]
+            conversation.append(f"{sender}: {text}")
+
+        conversation_text = "\n".join(conversation)
+
+        system_prompt = f"""Проанализируй переписку с клиентом и извлеки информацию.
+Название чата: {chat_name}
+
+Верни JSON со следующими полями (только если информация ЯВНО есть в переписке):
+
+{{
+  "client_name": "название компании/проекта клиента",
+  "decision_maker": "ЛПР - кто принимает решения (имя, должность)",
+  "contact_person": "контактное лицо, с кем общаемся (имя)",
+  "preferences": "что клиенту нравится, важно (кратко)",
+  "dislikes": "что не нравится, раздражает (кратко)",
+  "communication_style": "формальный/дружеский/деловой",
+  "service_type": "тип услуги: geo/context/site/serm"
+}}
+
+Правила:
+- Заполняй ТОЛЬКО поля, информация о которых ЯВНО есть в переписке
+- Не выдумывай и не додумывай
+- Если информации нет — не включай поле в JSON
+- Пиши кратко, по делу
+- client_name извлеки из названия чата или переписки"""
+
+        result = self._call_gpt(system_prompt, conversation_text, max_tokens=400, temperature=0.3)
+
+        if not result:
+            return {}
+
+        try:
+            import json
+            result = result.strip()
+            if result.startswith("```"):
+                result = result.split("```")[1]
+                if result.startswith("json"):
+                    result = result[4:]
+            result = result.strip()
+
+            data = json.loads(result)
+            # Фильтруем пустые значения
+            return {k: v for k, v in data.items() if v and v.strip()}
+        except Exception as e:
+            logger.error(f"Error parsing client info: {e}")
+            return {}
+
 
 # Глобальный экземпляр
 ai_service = OpenAIService()

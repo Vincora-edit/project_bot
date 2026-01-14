@@ -412,6 +412,94 @@ class Database:
             logger.error(f"Error appending client note: {e}")
             return False
 
+    # ============ REMINDERS ============
+
+    def create_reminder(
+        self,
+        chat_id: str,
+        chat_name: str,
+        project_id: int,
+        reminder_text: str,
+        remind_at: datetime,
+        context: str = None,
+        source_message_id: int = None
+    ) -> dict | None:
+        """Создаёт напоминание."""
+        try:
+            data = {
+                "chat_id": chat_id,
+                "chat_name": chat_name,
+                "project_id": project_id,
+                "reminder_text": reminder_text,
+                "remind_at": remind_at.isoformat(),
+                "context": context,
+                "source_message_id": source_message_id,
+                "status": "pending",
+            }
+            result = self.client.table("reminders").insert(data).execute()
+            return result.data[0] if result.data else None
+        except Exception as e:
+            logger.error(f"Error creating reminder: {e}")
+            return None
+
+    def get_pending_reminders(self, before: datetime = None) -> list[dict]:
+        """Получает напоминания, которые пора отправить."""
+        try:
+            if before is None:
+                before = datetime.now(timezone.utc)
+
+            result = (
+                self.client.table("reminders")
+                .select("*")
+                .eq("status", "pending")
+                .lte("remind_at", before.isoformat())
+                .order("remind_at")
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting pending reminders: {e}")
+            return []
+
+    def mark_reminder_sent(self, reminder_id: int) -> bool:
+        """Отмечает напоминание как отправленное."""
+        try:
+            self.client.table("reminders").update({
+                "status": "sent",
+                "sent_at": datetime.now(timezone.utc).isoformat()
+            }).eq("id", reminder_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error marking reminder sent: {e}")
+            return False
+
+    def get_reminders_for_project(self, project_id: int, status: str = "pending") -> list[dict]:
+        """Получает напоминания для проджекта."""
+        try:
+            result = (
+                self.client.table("reminders")
+                .select("*")
+                .eq("project_id", project_id)
+                .eq("status", status)
+                .order("remind_at")
+                .execute()
+            )
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting reminders for project: {e}")
+            return []
+
+    def cancel_reminder(self, reminder_id: int) -> bool:
+        """Отменяет напоминание."""
+        try:
+            self.client.table("reminders").update({
+                "status": "cancelled"
+            }).eq("id", reminder_id).execute()
+            return True
+        except Exception as e:
+            logger.error(f"Error cancelling reminder: {e}")
+            return False
+
 
 # Глобальный экземпляр
 db = Database()

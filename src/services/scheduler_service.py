@@ -75,6 +75,16 @@ class SchedulerService:
         )
         logger.info("Допродажа: 1 числа каждого месяца в 10:00")
 
+        # Проверка напоминаний о договорённостях — каждые 15 минут
+        self.scheduler.add_job(
+            self.check_reminders_job,
+            "interval",
+            minutes=15,
+            id="reminders_check",
+            replace_existing=True
+        )
+        logger.info("Проверка напоминаний: каждые 15 минут")
+
         self.scheduler.start()
         logger.info(f"Планировщик запущен, таймзона: {self.scheduler.timezone}")
 
@@ -305,3 +315,41 @@ class SchedulerService:
 
         except Exception as e:
             logger.error(f"Ошибка monthly_upsell_job: {e}")
+
+    async def check_reminders_job(self):
+        """Проверка и отправка напоминаний о договорённостях."""
+        now = now_local()
+
+        # Не отправляем в нерабочее время
+        if not is_work_time(now):
+            return
+
+        try:
+            pending = db.get_pending_reminders()
+
+            for reminder in pending:
+                try:
+                    project_id = reminder.get("project_id")
+                    chat_name = reminder.get("chat_name", "Unknown")
+                    reminder_text = reminder.get("reminder_text", "")
+                    context = reminder.get("context", "")
+
+                    message = (
+                        f"⏰ Напоминание о договорённости\n\n"
+                        f"🏷️ Чат: {chat_name}\n"
+                        f"📝 {reminder_text}\n"
+                    )
+
+                    if context:
+                        message += f"\n💬 Контекст: _{context[:200]}_"
+
+                    await bot.send_message(int(project_id), message, parse_mode="Markdown")
+                    db.mark_reminder_sent(reminder["id"])
+
+                    logger.info(f"Напоминание отправлено проджекту {project_id}: {reminder_text}")
+
+                except Exception as e:
+                    logger.error(f"Ошибка отправки напоминания: {e}")
+
+        except Exception as e:
+            logger.error(f"Ошибка check_reminders_job: {e}")
