@@ -330,8 +330,7 @@ class OpenAIService:
             max_tokens=500
         )
 
-
-async def generate_digest(
+    async def generate_digest(
         self,
         messages: list[dict],
         client_info: dict | None = None,
