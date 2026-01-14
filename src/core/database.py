@@ -312,6 +312,50 @@ class Database:
             logger.error(f"Error marking NPS sent: {e}")
             return False
 
+    # ============ DIGEST ============
+
+    def get_messages_for_period(
+        self,
+        chat_id: str,
+        since: datetime,
+        until: datetime | None = None,
+        limit: int = 500
+    ) -> list[dict]:
+        """
+        Получает сообщения из чата за указанный период.
+
+        Args:
+            chat_id: ID чата
+            since: Начало периода (datetime с timezone)
+            until: Конец периода (если None — до текущего момента)
+            limit: Максимум сообщений
+
+        Returns:
+            Список сообщений, отсортированных по времени (старые первыми)
+        """
+        try:
+            query = (
+                self.client.table("chat_log")
+                .select("from_name, text, is_project, timestamp")
+                .eq("chat_id", chat_id)
+                .gte("timestamp", since.isoformat())
+            )
+
+            if until:
+                query = query.lte("timestamp", until.isoformat())
+
+            result = (
+                query
+                .order("timestamp", desc=False)
+                .limit(limit)
+                .execute()
+            )
+
+            return result.data or []
+        except Exception as e:
+            logger.error(f"Error getting messages for period: {e}")
+            return []
+
     # ============ CLIENT KNOWLEDGE ============
 
     def get_client_knowledge(self, chat_id: str) -> dict | None:

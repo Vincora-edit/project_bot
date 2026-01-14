@@ -10,15 +10,17 @@
 - /deals — список сделок в чате
 - /unlink — отвязать сделку
 - /client — база знаний по клиенту
+- /digest — дайджест по клиенту
 """
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 from aiogram import Router, types
 from aiogram.filters import Command, CommandObject
 
 from src.config import settings
 from src.core import db, bot
+from src.services import ai_service
 from src.utils.logging import get_logger
 
 
@@ -314,31 +316,79 @@ CLIENT_FIELDS = {
 }
 
 
+def _get_chat_list_for_user(project_id: int) -> list[dict]:
+    """Получает список чатов, где пользователь — владелец."""
+    all_owners = db.get_all_chat_owners()
+    return [o for o in all_owners if o.get("project_id") == project_id]
+
+
 @router.message(Command("client"))
 async def cmd_client(message: types.Message, command: CommandObject):
     """
     /client — база знаний по клиенту.
 
-    Использование:
-    /client — показать всю информацию
-    /client lpr Иван Петров, директор
-    /client contact Мария, маркетолог
-    /client likes Детальные отчёты
-    /client dislikes Звонки без предупреждения
-    /client style Дружеский
-    /client time 10:00-12:00
-    /client note Уходит в отпуск в августе
-    /client payday 15
+    В личке:
+    /client — список всех клиентов
+    /client CHAT_ID — информация по клиенту
+    /client CHAT_ID lpr Иван — обновить ЛПР
+
+    В групповом чате:
+    /client — показать информацию (клиент увидит!)
+    /client lpr Иван — обновить ЛПР (клиент увидит!)
+
+    Лучше использовать в личке с ботом!
     """
     if message.from_user.id not in settings.project_ids:
         return
 
-    if message.chat.type == "private":
-        await message.answer("Команда работает только в групповых чатах.")
-        return
-
-    chat_id = str(message.chat.id)
     args = (command.args or "").strip()
+    is_private = message.chat.type == "private"
+
+    # Определяем chat_id
+    chat_id = None
+
+    if is_private:
+        # В личке: первый аргумент может быть chat_id
+        if not args:
+            # Показываем список клиентов
+            chats = _get_chat_list_for_user(message.from_user.id)
+            if not chats:
+                await message.answer(
+                    "📋 У тебя пока нет назначенных чатов.\n"
+                    "Владелец может назначить тебя командой `/assign`.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            lines = ["📋 *Твои клиенты:*\n"]
+            for chat in chats:
+                chat_name = chat.get("chat_name", "Без названия")
+                cid = chat.get("chat_id")
+                lines.append(f"• `{cid}` — {chat_name}")
+
+            lines.append("\n\n💡 Используй: `/client CHAT_ID` для просмотра базы знаний")
+            await message.answer("\n".join(lines), parse_mode="Markdown")
+            return
+
+        parts = args.split(maxsplit=1)
+        first_arg = parts[0]
+
+        # Проверяем, это chat_id или поле
+        if first_arg.lstrip("-").isdigit():
+            chat_id = first_arg
+            args = parts[1] if len(parts) > 1 else ""
+        else:
+            await message.answer(
+                "В личке нужно указать ID чата:\n"
+                "`/client CHAT_ID` — просмотр\n"
+                "`/client CHAT_ID lpr Иван` — редактирование\n\n"
+                "Используй `/client` без аргументов для списка своих чатов.",
+                parse_mode="Markdown"
+            )
+            return
+    else:
+        # В групповом чате — используем текущий
+        chat_id = str(message.chat.id)
 
     # Если без аргументов — показать информацию
     if not args:
@@ -449,3 +499,137 @@ async def cmd_client(message: types.Message, command: CommandObject):
     except Exception as e:
         logger.error(f"Ошибка обновления клиента: {e}")
         await message.answer(f"❌ Ошибка: {e}")
+
+
+# Маппинг периодов для дайджеста
+DIGEST_PERIODS = {
+    "day": (1, "за сегодня"),
+    "today": (1, "за сегодня"),
+    "week": (7, "за неделю"),
+    "month": (30, "за месяц"),
+    "3d": (3, "за 3 дня"),
+    "7d": (7, "за 7 дней"),
+    "14d": (14, "за 14 дней"),
+    "30d": (30, "за 30 дней"),
+}
+
+
+@router.message(Command("digest"))
+async def cmd_digest(message: types.Message, command: CommandObject):
+    """
+    /digest [CHAT_ID] [period] — дайджест переписки с клиентом.
+
+    В личке:
+    /digest — список клиентов
+    /digest CHAT_ID — дайджест за неделю
+    /digest CHAT_ID 14d — дайджест за 14 дней
+
+    В групповом чате:
+    /digest — за неделю
+    /digest 14d — за 14 дней
+
+    Периоды: day, 3d, week, 14d, month
+    """
+    if message.from_user.id not in settings.project_ids:
+        return
+
+    args = (command.args or "").strip()
+    is_private = message.chat.type == "private"
+
+    chat_id = None
+    period_arg = "week"
+
+    if is_private:
+        if not args:
+            # Показываем список клиентов
+            chats = _get_chat_list_for_user(message.from_user.id)
+            if not chats:
+                await message.answer(
+                    "📋 У тебя пока нет назначенных чатов.\n"
+                    "Владелец может назначить тебя командой `/assign`.",
+                    parse_mode="Markdown"
+                )
+                return
+
+            lines = ["📋 *Твои клиенты:*\n"]
+            for chat in chats:
+                chat_name = chat.get("chat_name", "Без названия")
+                cid = chat.get("chat_id")
+                lines.append(f"• `{cid}` — {chat_name}")
+
+            lines.append("\n\n💡 Используй: `/digest CHAT_ID` или `/digest CHAT_ID 14d`")
+            await message.answer("\n".join(lines), parse_mode="Markdown")
+            return
+
+        parts = args.split()
+        first_arg = parts[0]
+
+        if first_arg.lstrip("-").isdigit() and len(first_arg) > 5:
+            # Это chat_id
+            chat_id = first_arg
+            period_arg = parts[1].lower() if len(parts) > 1 else "week"
+        else:
+            await message.answer(
+                "В личке нужно указать ID чата:\n"
+                "`/digest CHAT_ID` — за неделю\n"
+                "`/digest CHAT_ID 14d` — за 14 дней\n\n"
+                "Используй `/digest` без аргументов для списка своих чатов.",
+                parse_mode="Markdown"
+            )
+            return
+    else:
+        chat_id = str(message.chat.id)
+        period_arg = args.lower() if args else "week"
+
+    # Определяем период
+    if period_arg in DIGEST_PERIODS:
+        days, period_name = DIGEST_PERIODS[period_arg]
+    elif period_arg.replace("d", "").isdigit():
+        days = int(period_arg.replace("d", ""))
+        period_name = f"за {days} дней"
+    else:
+        await message.answer(
+            "❓ Неизвестный период. Доступные варианты:\n"
+            "`/digest day` — за сегодня\n"
+            "`/digest 3d` — за 3 дня\n"
+            "`/digest week` — за неделю\n"
+            "`/digest 14d` — за 2 недели\n"
+            "`/digest month` — за месяц",
+            parse_mode="Markdown"
+        )
+        return
+
+    # Отправляем индикатор загрузки
+    loading_msg = await message.answer("⏳ Генерирую дайджест...")
+
+    try:
+        # Получаем сообщения за период
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        messages = db.get_messages_for_period(chat_id, since)
+
+        if not messages:
+            await loading_msg.edit_text(
+                f"📭 За указанный период ({period_name}) сообщений не найдено."
+            )
+            return
+
+        # Получаем информацию о клиенте
+        client_info = db.get_client_knowledge(chat_id)
+
+        # Генерируем дайджест
+        digest = await ai_service.generate_digest(messages, client_info, period_name)
+
+        # Добавляем статистику
+        client_messages = sum(1 for m in messages if not m.get("is_project"))
+        project_messages = sum(1 for m in messages if m.get("is_project"))
+
+        header = (
+            f"📊 *Дайджест {period_name}*\n"
+            f"💬 Сообщений: {len(messages)} (клиент: {client_messages}, проджект: {project_messages})\n\n"
+        )
+
+        await loading_msg.edit_text(header + digest, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Ошибка генерации дайджеста: {e}")
+        await loading_msg.edit_text(f"❌ Ошибка генерации дайджеста: {e}")
