@@ -319,7 +319,8 @@ CLIENT_FIELDS = {
 def _get_chat_list_for_user(project_id: int) -> list[dict]:
     """Получает список чатов, где пользователь — владелец."""
     all_owners = db.get_all_chat_owners()
-    return [o for o in all_owners if o.get("project_id") == project_id]
+    # project_id в БД может быть строкой или числом
+    return [o for o in all_owners if str(o.get("project_id")) == str(project_id)]
 
 
 @router.message(Command("client"))
