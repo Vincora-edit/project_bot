@@ -1011,6 +1011,7 @@ async def cmd_dashboard(message: types.Message):
                 f"{dashboard_api}/api/auth/generate-login-link",
                 json={
                     "telegramId": message.from_user.id,
+                    "userName": message.from_user.full_name,
                     "botSecret": bot_secret,
                 },
                 timeout=aiohttp.ClientTimeout(total=10)
