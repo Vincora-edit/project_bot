@@ -38,6 +38,10 @@ class Settings:
     webhook_port: int = field(default_factory=lambda: int(os.getenv("WEBHOOK_PORT", "8081")))
     webhook_secret: str = field(default_factory=lambda: os.getenv("WEBHOOK_SECRET", ""))
 
+    # Dashboard
+    dashboard_api_url: str = field(default_factory=lambda: os.getenv("DASHBOARD_API_URL", ""))
+    dashboard_bot_secret: str = field(default_factory=lambda: os.getenv("DASHBOARD_BOT_SECRET", ""))
+
     # Временная зона
     timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("Europe/Moscow"))
 

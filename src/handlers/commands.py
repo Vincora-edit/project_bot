@@ -3,17 +3,22 @@
 
 Команды:
 - /start — приветствие
+- /help — справка по возможностям
 - /botchatid — получить ID чата для Битрикса
 - /who — кто ответственный проджект
 - /assign — назначить проджекта
 - /link — привязать сделку
 - /deals — список сделок в чате
 - /unlink — отвязать сделку
-- /client — база знаний по клиенту
-- /digest — дайджест по клиенту
+- /client — база знаний по клиенту (в личке)
+- /digest — дайджест по клиенту (в личке)
+- /reminders — мои напоминания (в личке)
+- /dashboard — ссылка на дашборд (в личке)
 """
 
 from datetime import datetime, timezone, timedelta
+
+import aiohttp
 
 from aiogram import Router, types, F
 from aiogram.filters import Command, CommandObject
@@ -50,9 +55,61 @@ def get_clients_keyboard(chats: list[dict], action: str = "client") -> InlineKey
 async def cmd_start(message: types.Message):
     """Команда /start — приветствие."""
     await message.answer(
-        "👋 Бот-координатор запущен!\n\n"
-        "Я слежу за ответами в чатах."
+        "👋 Привет! Я бот-заботушка 💕\n\n"
+        "Слежу за ответами в чатах и помогаю не забывать о важном.\n\n"
+        "Напиши /help чтобы узнать, что я умею."
     )
+
+
+@router.message(Command("help"), F.chat.type == "private")
+async def cmd_help(message: types.Message):
+    """Команда /help — справка по возможностям бота (только в личке)."""
+    help_text = """🤖 *Что я умею:*
+
+*📊 Мониторинг чатов*
+Слежу за сообщениями клиентов и напоминаю ответить, если прошло 15/30/60 минут без ответа.
+
+*⏰ Договорённости*
+Автоматически распознаю обещания ("завтра пришлю", "сделаю на неделе") и напоминаю о них. Ставлю 👀 на такие сообщения.
+
+*📋 База знаний*
+Храню информацию о клиентах: ЛПР, предпочтения, заметки.
+
+*📈 Дайджесты*
+Генерирую AI-сводки по переписке с клиентом за период.
+
+*🎊 Праздники*
+В праздничные дни предлагаю готовые поздравления для клиентов.
+
+*💡 Допродажи*
+1 числа каждого месяца генерирую идеи допродаж.
+
+*📨 Интеграция с Битрикс24*
+• Автоматические сообщения при смене стадии сделки
+• NPS-опросы после завершения работ
+• Отправка актов и счетов клиентам в чат
+
+———————————————
+
+*📝 Команды:*
+
+`/help` — эта справка
+`/botchatid` — получить ID чата для Битрикса
+`/who` — кто ответственный проджект
+`/assign @username` — назначить проджекта
+`/link DEAL_ID` — привязать сделку
+`/deals` — список сделок в чате
+`/unlink DEAL_ID` — отвязать сделку
+
+*В личке:*
+`/client` — база знаний по клиентам
+`/digest` — дайджест по клиенту
+`/reminders` — мои напоминания
+
+*💬 Переслать сообщение*
+Перешли мне сообщение клиента в личку — сгенерирую варианты ответа."""
+
+    await message.answer(help_text, parse_mode="Markdown")
 
 
 @router.message(Command("botchatid"))
@@ -813,3 +870,172 @@ async def callback_back_clients(callback: CallbackQuery):
         parse_mode="Markdown",
         reply_markup=keyboard
     )
+
+
+# ============ НАПОМИНАНИЯ ============
+
+@router.message(Command("reminders"))
+async def cmd_reminders(message: types.Message):
+    """/reminders — показать активные напоминания (только в личке)."""
+    if message.chat.type != "private":
+        await message.answer("📩 Эта команда работает только в личке со мной.")
+        return
+
+    if message.from_user.id not in settings.project_ids:
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    reminders = db.get_reminders_for_project(message.from_user.id, status="pending")
+
+    if not reminders:
+        await message.answer("📭 У тебя нет активных напоминаний.")
+        return
+
+    # Формируем список с кнопками удаления
+    text_parts = ["⏰ *Твои активные напоминания:*\n"]
+
+    buttons = []
+    for r in reminders[:15]:  # Лимит 15
+        chat_name = r.get("chat_name", "Unknown")[:20]
+        reminder_text = r.get("reminder_text", "")[:40]
+        remind_at = r.get("remind_at", "")
+
+        # Форматируем время
+        if remind_at:
+            try:
+                dt = datetime.fromisoformat(remind_at.replace("Z", "+00:00"))
+                time_str = dt.strftime("%d.%m %H:%M")
+            except:
+                time_str = "?"
+        else:
+            time_str = "?"
+
+        text_parts.append(f"📌 *{chat_name}*")
+        text_parts.append(f"   {reminder_text}")
+        text_parts.append(f"   🕐 {time_str}\n")
+
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"❌ {chat_name}: {reminder_text[:20]}",
+                callback_data=f"del_reminder:{r['id']}"
+            )
+        ])
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    await message.answer("\n".join(text_parts), parse_mode="Markdown", reply_markup=keyboard)
+
+
+@router.callback_query(F.data.startswith("del_reminder:"))
+async def callback_delete_reminder(callback: CallbackQuery):
+    """Удаление напоминания по кнопке."""
+    if callback.from_user.id not in settings.project_ids:
+        await callback.answer("Нет доступа", show_alert=True)
+        return
+
+    reminder_id = int(callback.data.split(":")[1])
+
+    # Удаляем напоминание
+    success = db.cancel_reminder(reminder_id)
+
+    if success:
+        await callback.answer("✅ Удалено", show_alert=False)
+
+        # Получаем оставшиеся напоминания и обновляем список
+        reminders = db.get_reminders_for_project(callback.from_user.id, status="pending")
+
+        if not reminders:
+            # Все напоминания удалены
+            await callback.message.edit_text("📭 У тебя нет активных напоминаний.")
+            return
+
+        # Формируем обновлённый список
+        text_parts = ["⏰ *Твои активные напоминания:*\n"]
+        buttons = []
+
+        for r in reminders[:15]:
+            chat_name = r.get("chat_name", "Unknown")[:20]
+            reminder_text = r.get("reminder_text", "")[:40]
+            remind_at = r.get("remind_at", "")
+
+            if remind_at:
+                try:
+                    dt = datetime.fromisoformat(remind_at.replace("Z", "+00:00"))
+                    time_str = dt.strftime("%d.%m %H:%M")
+                except:
+                    time_str = "?"
+            else:
+                time_str = "?"
+
+            text_parts.append(f"📌 *{chat_name}*")
+            text_parts.append(f"   {reminder_text}")
+            text_parts.append(f"   🕐 {time_str}\n")
+
+            buttons.append([
+                InlineKeyboardButton(
+                    text=f"❌ {chat_name}: {reminder_text[:20]}",
+                    callback_data=f"del_reminder:{r['id']}"
+                )
+            ])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+        await callback.message.edit_text("\n".join(text_parts), parse_mode="Markdown", reply_markup=keyboard)
+    else:
+        await callback.answer("❌ Не удалось удалить", show_alert=True)
+
+
+# ============ ДАШБОРД ============
+
+@router.message(Command("dashboard"), F.chat.type == "private")
+async def cmd_dashboard(message: types.Message):
+    """/dashboard — получить ссылку на веб-дашборд (только в личке)."""
+    if message.from_user.id not in settings.project_ids:
+        await message.answer("⛔ Нет доступа к дашборду.")
+        return
+
+    dashboard_api = getattr(settings, 'dashboard_api_url', None)
+    bot_secret = getattr(settings, 'dashboard_bot_secret', None)
+
+    if not dashboard_api or not bot_secret:
+        await message.answer(
+            "📊 *Дашборд НейроПроджект*\n\n"
+            "Дашборд ещё не настроен.\n"
+            "Скоро здесь будет ссылка для входа!",
+            parse_mode="Markdown"
+        )
+        return
+
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{dashboard_api}/api/auth/generate-login-link",
+                json={
+                    "telegramId": message.from_user.id,
+                    "botSecret": bot_secret,
+                },
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if data.get("success") and data.get("data", {}).get("loginLink"):
+                        login_link = data["data"]["loginLink"]
+                        await message.answer(
+                            "📊 *Дашборд НейроПроджект*\n\n"
+                            f"[Войти в дашборд]({login_link})\n\n"
+                            "⏳ Ссылка действительна 15 минут.",
+                            parse_mode="Markdown",
+                            disable_web_page_preview=True
+                        )
+                        return
+
+                await message.answer(
+                    "❌ Не удалось получить ссылку на дашборд.\n"
+                    "Попробуй позже или обратись к администратору."
+                )
+
+    except Exception as e:
+        logger.error(f"Ошибка получения ссылки на дашборд: {e}")
+        await message.answer(
+            "❌ Ошибка соединения с дашбордом.\n"
+            "Попробуй позже."
+        )
