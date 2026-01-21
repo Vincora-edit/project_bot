@@ -12,6 +12,7 @@
 from datetime import timedelta, datetime, timezone
 
 from aiogram import Router, types, F
+from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
 from src.config import settings
 from src.core import db, bot
@@ -33,8 +34,79 @@ def set_scheduler(sched):
     scheduler = sched
 
 
+def _calculate_remind_at(commitment: dict) -> tuple[datetime, str]:
+    """
+    Вычисляет время напоминания на основе данных из commitment.
+
+    Returns:
+        tuple[datetime, str]: (remind_at в UTC, строка для отображения пользователю)
+    """
+    deadline_type = commitment.get("deadline_type")
+    deadline_date = commitment.get("deadline_date")
+    deadline_time = commitment.get("deadline_time")
+    remind_in_hours = commitment.get("remind_in_hours")
+
+    now = now_local()
+
+    # Если указана конкретная дата
+    if deadline_type == "date" and deadline_date:
+        try:
+            # Парсим дату
+            year, month, day = map(int, deadline_date.split("-"))
+            target_date = now.replace(year=year, month=month, day=day)
+
+            # Парсим время или ставим 17:00 по умолчанию
+            if deadline_time:
+                hour, minute = map(int, deadline_time.split(":"))
+            else:
+                hour, minute = 17, 0  # По умолчанию 17:00
+
+            remind_at_local = target_date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+            # Конвертируем в UTC для хранения
+            remind_at_utc = remind_at_local.astimezone(timezone.utc)
+
+            # Форматируем строку для пользователя
+            weekdays = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+            weekday = weekdays[remind_at_local.weekday()]
+            time_str = f"{remind_at_local.day:02d}.{remind_at_local.month:02d} ({weekday}) в {hour:02d}:{minute:02d}"
+
+            return remind_at_utc, time_str
+        except Exception as e:
+            logger.warning(f"Ошибка парсинга даты {deadline_date}: {e}")
+            # Fallback на remind_in_hours или 24 часа
+            hours = remind_in_hours or 24
+            remind_at = datetime.now(timezone.utc) + timedelta(hours=hours)
+            return remind_at, f"через {int(hours)} ч"
+
+    # Если указано количество часов
+    if remind_in_hours:
+        remind_at = datetime.now(timezone.utc) + timedelta(hours=remind_in_hours)
+
+        # Форматируем строку
+        if remind_in_hours < 1:
+            time_str = f"через {int(remind_in_hours * 60)} мин"
+        elif remind_in_hours == 1:
+            time_str = "через 1 час"
+        elif remind_in_hours < 24:
+            time_str = f"через {int(remind_in_hours)} ч"
+        else:
+            days = int(remind_in_hours / 24)
+            time_str = f"через {days} дн"
+
+        return remind_at, time_str
+
+    # Fallback: 24 часа
+    remind_at = datetime.now(timezone.utc) + timedelta(hours=24)
+    return remind_at, "через 24 ч"
+
+
 async def check_for_commitments(message: types.Message, text: str):
     """Проверяет сообщение проджекта на договорённости и создаёт напоминание."""
+    # Пропускаем пересланные сообщения — это не обещания проджекта
+    if message.forward_date or message.forward_from or message.forward_from_chat:
+        return
+
     try:
         # Получаем контекст
         context = await get_recent_context(str(message.chat.id), int(message.message_id), limit=5)
@@ -46,8 +118,7 @@ async def check_for_commitments(message: types.Message, text: str):
             return
 
         # Вычисляем время напоминания
-        remind_in_hours = commitment.get("remind_in_hours", 24)
-        remind_at = datetime.now(timezone.utc) + timedelta(hours=remind_in_hours)
+        remind_at, time_str = _calculate_remind_at(commitment)
 
         # Создаём напоминание
         reminder = db.create_reminder(
@@ -63,8 +134,45 @@ async def check_for_commitments(message: types.Message, text: str):
         if reminder:
             logger.info(
                 f"Создано напоминание: '{commitment.get('text')}' "
-                f"через {remind_in_hours}ч для project_id={message.from_user.id}"
+                f"на {remind_at.isoformat()} для project_id={message.from_user.id}"
             )
+
+            # Ставим реакцию 👀 на сообщение (⏰ не поддерживается Telegram)
+            try:
+                await message.react([types.ReactionTypeEmoji(emoji="👀")])
+            except Exception as e:
+                logger.warning(f"Не удалось поставить реакцию: {e}")
+
+            # Отправляем личное уведомление проджекту
+            try:
+                commitment_text = commitment.get('text', text[:100])
+                notify_text = (
+                    f"⏰ Запомнила договорённость\n\n"
+                    f"🏷️ Чат: {message.chat.title or 'Unknown'}\n"
+                    f"📝 {commitment_text}\n\n"
+                    f"Напомню {time_str}"
+                )
+                # Кнопки: удалить напоминание + создать задачу в Битрикс
+                buttons = [
+                    [InlineKeyboardButton(
+                        text="❌ Удалить напоминание",
+                        callback_data=f"del_reminder:{reminder['id']}"
+                    )]
+                ]
+                # Добавляем кнопку Битрикс если настроен
+                if settings.bitrix_webhook_url:
+                    # Сохраняем текст задачи в callback_data (ограничение 64 байта)
+                    # Используем reminder_id для получения полного текста
+                    buttons.append([
+                        InlineKeyboardButton(
+                            text="📋 Создать задачу в Б24",
+                            callback_data=f"task_from_commit:{reminder['id']}"
+                        )
+                    ])
+                keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+                await bot.send_message(message.from_user.id, notify_text, reply_markup=keyboard)
+            except Exception as e:
+                logger.warning(f"Не удалось отправить уведомление проджекту: {e}")
 
     except Exception as e:
         logger.error(f"Ошибка проверки договорённостей: {e}")
@@ -228,14 +336,171 @@ async def check_for_answer(log_id: int, chat_id: str, message_id: int, attempt: 
 
 @router.message(F.chat.type == "private")
 async def handle_private_message(message: types.Message):
-    """Обработка сообщений в личку — генерация вариантов ответа."""
+    """Обработка сообщений в личку — общение с заботушкой."""
     if message.from_user.id not in settings.project_ids:
         return
 
-    if not message.forward_origin:
-        await message.answer("ℹ️ Перешли мне сообщение клиента из чата, и я предложу варианты ответа.")
+    # Если это пересланное сообщение — генерируем варианты ответа
+    if message.forward_origin:
+        await handle_forwarded_message(message)
         return
 
+    # Обычное сообщение — общаемся как ассистент
+    text = (message.text or "").strip()
+    if not text:
+        return
+
+    # Получаем список клиентов пользователя для контекста
+    user_id = message.from_user.id
+    if user_id == settings.owner_id:
+        chats = db.get_all_chat_owners()
+    else:
+        chats = db.get_chats_for_project(user_id)
+
+    client_names = [c.get("chat_name", "") for c in chats if c.get("chat_name")]
+
+    # Спрашиваем AI что хочет пользователь
+    result = await ai_service.chat_with_assistant(
+        user_message=text,
+        user_name=message.from_user.first_name or "друг",
+        available_clients=client_names
+    )
+
+    response_type = result.get("type", "chat")
+    response_text = result.get("response", "")
+    client_name = result.get("client_name")
+    period = result.get("period", "неделя")
+    reminder_text = result.get("reminder_text")
+    remind_in_hours = result.get("remind_in_hours")
+
+    # Если запрос на создание напоминания
+    if response_type == "reminder" and reminder_text and remind_in_hours:
+        await handle_personal_reminder(message, reminder_text, remind_in_hours, response_text)
+        return
+
+    # Если запрос на статистику/дайджест — находим клиента и выдаём данные
+    if response_type == "stats" and client_name:
+        await handle_stats_request(message, client_name, period, chats)
+        return
+
+    # Просто отвечаем
+    if response_text:
+        await message.answer(response_text)
+
+
+async def handle_personal_reminder(message: types.Message, reminder_text: str, remind_in_hours: float, response_text: str):
+    """Создание личного напоминания через чат."""
+    try:
+        remind_at = datetime.now(timezone.utc) + timedelta(hours=remind_in_hours)
+
+        # Создаём напоминание (chat_id = "personal" для личных напоминаний)
+        reminder = db.create_reminder(
+            chat_id="personal",
+            chat_name="Личное",
+            project_id=message.from_user.id,
+            reminder_text=reminder_text,
+            remind_at=remind_at,
+            context="",
+            source_message_id=message.message_id
+        )
+
+        if reminder:
+            # Форматируем время для ответа
+            if remind_in_hours < 1:
+                time_str = f"{int(remind_in_hours * 60)} мин"
+            elif remind_in_hours == 1:
+                time_str = "1 час"
+            elif remind_in_hours < 24:
+                time_str = f"{int(remind_in_hours)} ч"
+            else:
+                days = int(remind_in_hours / 24)
+                time_str = f"{days} дн"
+
+            # Кнопка для удаления
+            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="❌ Отменить",
+                    callback_data=f"del_reminder:{reminder['id']}"
+                )
+            ]])
+
+            await message.answer(
+                f"✅ Запомнила! Напомню через {time_str}:\n📝 {reminder_text}",
+                reply_markup=keyboard
+            )
+        else:
+            await message.answer(response_text or "Хм, не получилось сохранить напоминание 😕")
+
+    except Exception as e:
+        logger.error(f"Ошибка создания личного напоминания: {e}")
+        await message.answer("Ой, что-то пошло не так. Попробуй ещё раз 🙏")
+
+
+async def handle_stats_request(message: types.Message, client_name: str, period: str, chats: list):
+    """Обработка запроса статистики по клиенту."""
+    # Ищем клиента по имени
+    target_chat = None
+    client_name_lower = client_name.lower()
+
+    for chat in chats:
+        chat_name = chat.get("chat_name", "").lower()
+        if client_name_lower in chat_name or chat_name in client_name_lower:
+            target_chat = chat
+            break
+
+    if not target_chat:
+        await message.answer(f"🤔 Не нашла клиента '{client_name}'. Попробуй уточнить название.")
+        return
+
+    chat_id = target_chat.get("chat_id")
+    chat_name = target_chat.get("chat_name", "Unknown")
+
+    await message.answer(f"📊 Собираю статистику по {chat_name}...")
+
+    try:
+        # Определяем период
+        if period == "месяц":
+            days = 30
+            period_text = "за месяц"
+        elif period == "день":
+            days = 1
+            period_text = "за день"
+        else:
+            days = 7
+            period_text = "за неделю"
+
+        since = datetime.now(timezone.utc) - timedelta(days=days)
+        messages = db.get_messages_for_period(chat_id, since)
+
+        if not messages:
+            await message.answer(f"📭 По {chat_name} {period_text} сообщений не найдено.")
+            return
+
+        # Считаем статистику
+        client_msgs = [m for m in messages if not m.get("is_project")]
+        project_msgs = [m for m in messages if m.get("is_project")]
+
+        # Генерируем дайджест
+        client_info = db.get_client_knowledge(chat_id)
+        digest = await ai_service.generate_digest(messages, client_info, period_text)
+
+        response = (
+            f"📊 *{chat_name}* {period_text}\n\n"
+            f"💬 Всего сообщений: {len(messages)}\n"
+            f"👤 От клиента: {len(client_msgs)}\n"
+            f"👩‍💼 От проджекта: {len(project_msgs)}\n\n"
+            f"📝 *Сводка:*\n{digest}"
+        )
+
+        await message.answer(response, parse_mode="Markdown")
+
+    except Exception as e:
+        logger.error(f"Ошибка статистики: {e}")
+        await message.answer("❌ Ошибка получения статистики. Попробуй ещё раз.")
+
+
+async def handle_forwarded_message(message: types.Message):
+    """Обработка пересланного сообщения — генерация вариантов ответа."""
     client_text = message.text or message.caption or ""
 
     if not client_text:
