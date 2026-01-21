@@ -42,6 +42,19 @@ class Settings:
     dashboard_api_url: str = field(default_factory=lambda: os.getenv("DASHBOARD_API_URL", ""))
     dashboard_bot_secret: str = field(default_factory=lambda: os.getenv("DASHBOARD_BOT_SECRET", ""))
 
+    # Bitrix24
+    bitrix_webhook_url: str = field(default_factory=lambda: os.getenv("BITRIX_WEBHOOK_URL", ""))
+
+    # Маппинг Telegram ID -> Bitrix24 User ID
+    telegram_to_bitrix: dict = field(default_factory=lambda: {
+        1139575259: 1,    # Артём Субботин
+        760732823: 47,    # Кристина Черепенькина
+        717802592: 15,    # Наталья Корочкина
+        4739313341: 25,   # Александр Кульков
+        5269702355: 11,   # Алексей Неверов
+        904374872: 245,   # Лия Полякова
+    })
+
     # Временная зона
     timezone: ZoneInfo = field(default_factory=lambda: ZoneInfo("Europe/Moscow"))
 
